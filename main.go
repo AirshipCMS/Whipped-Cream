@@ -10,13 +10,30 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 )
 
+// TTL info for each request
+type TTL struct {
+	CachedTime time.Time
+	ExpiryTime time.Time
+}
+
 const (
-	targetURLEnv = "TARGET_URL"
+	defaultPort        = "8080"
+	portEnv            = "PORT"
+	targetURLEnv       = "TARGET_URL"
+	defaultMemcacheURL = "127.0.0.1:11211"
+	memcacheURLEnv     = "MEMCACHE_URL"
+	defaultTTL         = "3600" // seconds
+	ttlEnv             = "TTL"
+	timeFormat         = "01-02-2006 03:04:05PM"
 )
 
 var (
-	mc        *memcache.Client
-	targetURL string
+	mc          *memcache.Client
+	reqMap      = make(map[string]TTL)
+	port        string
+	targetURL   string
+	memcacheURL string
+	ttl         string
 )
 
 func fetch(path string) *http.Response {
@@ -40,6 +57,23 @@ func fetch(path string) *http.Response {
 	return response
 }
 
+func cacheMiss(urlPath string) []byte {
+	backendResponse := fetch(urlPath)
+
+	body, _ := ioutil.ReadAll(backendResponse.Body)
+
+	mc.Set(&memcache.Item{Key: urlPath, Value: []byte(body)})
+
+	d, _ := time.ParseDuration(ttl + "s")
+	reqMap[urlPath] = TTL{
+		CachedTime: time.Now().Local(),
+		ExpiryTime: time.Now().Local().Add(time.Duration(d)),
+	}
+
+	fmt.Printf("Expiry Time: %s\n", reqMap[urlPath].ExpiryTime.Format(timeFormat))
+	return body
+}
+
 func req(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[%s] Incoming Request\n", r.URL.Path)
@@ -50,13 +84,9 @@ func req(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		backendResponse := fetch(r.URL.Path)
-
-		body, _ := ioutil.ReadAll(backendResponse.Body)
-
-		w.Write(body)
-
-		mc.Set(&memcache.Item{Key: r.URL.Path, Value: []byte(body)})
+		w.Write(cacheMiss(r.URL.Path))
+	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
+		w.Write(cacheMiss(r.URL.Path))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
 
@@ -65,15 +95,26 @@ func req(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func getEnv(key, defVal string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return defVal
+}
+
 func main() {
 
+	port = getEnv(portEnv, defaultPort)
+	memcacheURL = getEnv(memcacheURLEnv, defaultMemcacheURL)
+	ttl = getEnv(ttlEnv, defaultTTL)
 	targetURL = os.Getenv(targetURLEnv)
 	if targetURL == "" {
-		fmt.Printf("Set %s to the domain that will be cached", targetURLEnv)
+		fmt.Printf("Set %s to the domain that will be cached\n", targetURLEnv)
 	}
 
-	mc = memcache.New("127.0.0.1:11211")
+	mc = memcache.New(memcacheURL)
 
 	http.HandleFunc("/", req)
-	http.ListenAndServe(":8080", nil)
+	fmt.Printf("Listening on port: %v\n", port)
+	http.ListenAndServe(":"+port, nil)
 }
