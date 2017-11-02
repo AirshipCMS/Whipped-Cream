@@ -37,7 +37,7 @@ var (
 	ttl         string
 )
 
-func fetch(path string) *http.Response {
+func fetch(path string, headers http.Header) *http.Response {
 
 	netClient := &http.Client{
 		Timeout: time.Second * 10,
@@ -46,9 +46,21 @@ func fetch(path string) *http.Response {
 	url := parseTargetURL(path)
 	fmt.Printf("[%s] Fetching\n", url)
 
-	response, err := netClient.Get(url)
-	if err != nil {
-		fmt.Printf("[%s] Error Fetching: %v", url, err)
+	req, reqErr := http.NewRequest("GET", url, nil)
+	if reqErr != nil {
+		fmt.Printf("[%s] Error Fetching: %v", url, reqErr)
+		return &http.Response{
+			Status: "503",
+		}
+	}
+
+	for k, v := range headers {
+		req.Header.Add(k, strings.Join(v, ", "))
+	}
+
+	response, resErr := netClient.Do(req)
+	if resErr != nil {
+		fmt.Printf("[%s] Error Fetching: %v", url, reqErr)
 		response = &http.Response{
 			Status: "503",
 		}
@@ -59,8 +71,8 @@ func fetch(path string) *http.Response {
 	return response
 }
 
-func cacheMiss(urlPath string) []byte {
-	backendResponse := fetch(urlPath)
+func cacheMiss(urlPath string, headers http.Header) []byte {
+	backendResponse := fetch(urlPath, headers)
 
 	body, _ := ioutil.ReadAll(backendResponse.Body)
 
@@ -86,10 +98,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		w.Write(cacheMiss(r.URL.Path))
+		w.Write(cacheMiss(r.URL.Path, r.Header))
 	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
 		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
-		w.Write(cacheMiss(r.URL.Path))
+		w.Write(cacheMiss(r.URL.Path, r.Header))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
 
