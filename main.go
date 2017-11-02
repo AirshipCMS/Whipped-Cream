@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -41,7 +42,8 @@ func fetch(path string) *http.Response {
 	netClient := &http.Client{
 		Timeout: time.Second * 10,
 	}
-	url := targetURL + path
+
+	url := parseTargetURL(path)
 	fmt.Printf("[%s] Fetching\n", url)
 
 	response, err := netClient.Get(url)
@@ -74,9 +76,9 @@ func cacheMiss(urlPath string) []byte {
 	return body
 }
 
-func req(w http.ResponseWriter, r *http.Request) {
+func handleGet(w http.ResponseWriter, r *http.Request) {
 
-	fmt.Printf("[%s] Incoming Request\n", r.URL.Path)
+	fmt.Printf("[%s] Incoming GET Request\n", r.URL.Path)
 
 	val, err := mc.Get(r.URL.Path)
 
@@ -86,6 +88,7 @@ func req(w http.ResponseWriter, r *http.Request) {
 
 		w.Write(cacheMiss(r.URL.Path))
 	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
+		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
 		w.Write(cacheMiss(r.URL.Path))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
@@ -93,6 +96,48 @@ func req(w http.ResponseWriter, r *http.Request) {
 		w.Write(val.Value)
 	}
 
+}
+
+func handleReq(w http.ResponseWriter, r *http.Request) {
+	reqMethod := strings.ToUpper(r.Method)
+	reqURL := parseTargetURL(r.URL.Path)
+	fmt.Printf("[%s] Incoming %s Request\n", reqURL, reqMethod)
+
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+
+	req, reqErr := http.NewRequest(reqMethod, reqURL, r.Body)
+	if reqErr != nil {
+		fmt.Printf("reqErr: %v\n", reqErr)
+		w.Write([]byte("Status: 503"))
+		return
+	}
+
+	for k, v := range r.Header {
+		req.Header.Add(k, strings.Join(v, ", "))
+	}
+
+	resp, resErr := client.Do(req)
+	if resErr != nil {
+		fmt.Printf("resErr: %v\n", resErr)
+		w.Write([]byte("Status: 503"))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := ioutil.ReadAll(resp.Body)
+	w.Write(body)
+	fmt.Printf("[%s] %s Response: %s\n", reqURL, reqMethod, string(body))
+}
+
+func parseTargetURL(path string) string {
+	reqURL := targetURL
+	if reqURL[len(reqURL)-1:] == "/" {
+		reqURL = reqURL[:len(reqURL)-1]
+	}
+
+	return reqURL + path
 }
 
 func getEnv(key, defVal string) string {
@@ -114,7 +159,13 @@ func main() {
 
 	mc = memcache.New(memcacheURL)
 
-	http.HandleFunc("/", req)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			handleGet(w, r)
+		} else {
+			handleReq(w, r)
+		}
+	})
 	fmt.Printf("Listening on port: %v\n", port)
 	http.ListenAndServe(":"+port, nil)
 }
