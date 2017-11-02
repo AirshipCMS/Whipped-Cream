@@ -2,6 +2,11 @@
 
 forward proxy cache with memcached
 
+## Build
+```
+CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo .
+```
+
 ## Memcache
 
 run locally for dev
@@ -9,7 +14,6 @@ run locally for dev
 ```sh
 run --name memcache -d -p 11211:11211 memcached:alpine
 ```
-
 
 ## Proof so far
 
