@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -18,22 +19,29 @@ type TTL struct {
 }
 
 const (
-	defaultPort        = "8080"
-	portEnv            = "PORT"
+	defaultHTTPPort    = "8080"
+	httpPortEnv        = "HTTP_PORT"
+	defaultHTTPSPort   = "4433"
+	httpsPortEnv       = "HTTPS_PORT"
 	targetURLEnv       = "TARGET_URL"
 	defaultMemcacheURL = "127.0.0.1:11211"
 	memcacheURLEnv     = "MEMCACHE_URL"
 	defaultTTL         = "3600" // seconds
 	ttlEnv             = "TTL"
+	certPathEnv        = "CERT_PATH"
+	certKeyPathEnv     = "CERT_KEY_PATH"
 	timeFormat         = "01-02-2006 03:04:05PM"
 )
 
 var (
 	mc          *memcache.Client
 	reqMap      = make(map[string]TTL)
-	port        string
+	httpPort    string
+	httpsPort   string
 	targetURL   string
 	memcacheURL string
+	certPath    string
+	certKeyPath string
 	ttl         string
 )
 
@@ -52,10 +60,6 @@ func fetch(path string, headers http.Header) *http.Response {
 		return &http.Response{
 			Status: "503",
 		}
-	}
-
-	for k, v := range headers {
-		req.Header.Add(k, strings.Join(v, ", "))
 	}
 
 	response, resErr := netClient.Do(req)
@@ -161,12 +165,23 @@ func getEnv(key, defVal string) string {
 
 func main() {
 
-	port = getEnv(portEnv, defaultPort)
+	httpPort = getEnv(httpPortEnv, defaultHTTPPort)
+	httpsPort = getEnv(httpsPortEnv, defaultHTTPSPort)
 	memcacheURL = getEnv(memcacheURLEnv, defaultMemcacheURL)
 	ttl = getEnv(ttlEnv, defaultTTL)
+	certPath = getEnv(certPathEnv, "")
+	certKeyPath = getEnv(certKeyPathEnv, "")
 	targetURL = os.Getenv(targetURLEnv)
-	if targetURL == "" {
+	switch {
+	case targetURL == "":
 		fmt.Printf("Set %s to the domain that will be cached\n", targetURLEnv)
+		return
+	case certPath == "":
+		fmt.Printf("Set %s to the path of the SSL .crt file\n", certPathEnv)
+		return
+	case certKeyPath == "":
+		fmt.Printf("Set %s to the path of the SSL .key file\n", certKeyPathEnv)
+		return
 	}
 
 	mc = memcache.New(memcacheURL)
@@ -178,6 +193,31 @@ func main() {
 			handleReq(w, r)
 		}
 	})
-	fmt.Printf("Listening on port: %v\n", port)
-	http.ListenAndServe(":"+port, nil)
+
+	go func() {
+		fmt.Printf("Listening on port: %v\n", httpPort)
+		httpErr := http.ListenAndServe(":"+httpPort, nil)
+		if httpErr != nil {
+			fmt.Printf("Error starting HTTP server: %v\n", httpErr)
+		}
+	}()
+
+	config := &tls.Config{}
+	cert, err := tls.LoadX509KeyPair(certPath, certKeyPath)
+	if err != nil {
+		fmt.Printf("Error loading certs: %v\n", err)
+	}
+	config.Certificates = append(config.Certificates, cert)
+	config.BuildNameToCertificate()
+
+	server := http.Server{
+		Addr:      ":" + httpsPort,
+		TLSConfig: config,
+	}
+
+	fmt.Printf("Listening on port: %v\n", httpsPort)
+	httpsErr := server.ListenAndServeTLS("", "")
+	if httpsErr != nil {
+		fmt.Printf("Error starting HTTPS server: %v\n", httpsErr)
+	}
 }
