@@ -68,10 +68,8 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 	var val []byte
 	s := strings.Split(r.URL.Path, "/")
-	bucketName := []byte(s[2])
-	fmt.Println("Bucket name: ", s[2])
-	fmt.Println("Key: ", s[3])
-	key := []byte(s[3])
+	bucketName := []byte(s[1])
+	key := []byte(s[2])
 	err = db.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bucketName)
 		if bkt != nil {
@@ -116,10 +114,8 @@ func handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 	s := strings.Split(r.URL.Path, "/")
-	fmt.Println("Bucket name: ", s[2])
-	fmt.Println("Key: ", s[3])
-	bucketName := []byte(s[2])
-	key := []byte(s[3])
+	bucketName := []byte(s[1])
+	key := []byte(s[2])
 	updateKey(bucketName, key, []byte(body), db)
 
 	d, _ := time.ParseDuration(ttl + "s")
