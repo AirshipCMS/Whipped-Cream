@@ -4,12 +4,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/boltdb/bolt"
 )
 
 // TTL info for each request
@@ -34,7 +35,6 @@ const (
 )
 
 var (
-	mc          *memcache.Client
 	reqMap      = make(map[string]TTL)
 	httpPort    string
 	httpsPort   string
@@ -43,6 +43,7 @@ var (
 	certPath    string
 	certKeyPath string
 	ttl         string
+	// db          *bolt.DB
 )
 
 func fetch(path string, headers http.Header) *http.Response {
@@ -75,12 +76,11 @@ func fetch(path string, headers http.Header) *http.Response {
 	return response
 }
 
-func cacheMiss(urlPath string, headers http.Header) []byte {
+func cacheMiss(urlPath string, headers http.Header, bucketName []byte, key []byte, db *bolt.DB) []byte {
 	backendResponse := fetch(urlPath, headers)
-
 	body, _ := ioutil.ReadAll(backendResponse.Body)
 
-	mc.Set(&memcache.Item{Key: urlPath, Value: []byte(body)})
+	updateKey(bucketName, key, []byte(body), db)
 
 	d, _ := time.ParseDuration(ttl + "s")
 	reqMap[urlPath] = TTL{
@@ -92,24 +92,57 @@ func cacheMiss(urlPath string, headers http.Header) []byte {
 	return body
 }
 
+func updateKey(bucketName []byte, key []byte, value []byte, db *bolt.DB) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		bkt, err := tx.CreateBucketIfNotExists(bucketName)
+		if err != nil {
+			return err
+		}
+		err = bkt.Put(key, value)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[%s] Incoming GET Request\n", r.URL.Path)
 
-	val, err := mc.Get(r.URL.Path)
+	db, err := bolt.Open("db", 0600, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	var val []byte
+	s := strings.Split(r.URL.Path, "/")
+	bucketName := []byte(s[2])
+	key := []byte(s[3])
+	err = db.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(bucketName)
+		if bkt != nil {
+			val = bkt.Get(key)
+			return err
+		}
+		return nil
+	})
 
 	if err != nil {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		w.Write(cacheMiss(r.URL.Path, r.Header))
+		w.Write(cacheMiss(r.URL.Path, r.Header, bucketName, key, db))
 	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
 		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
-		w.Write(cacheMiss(r.URL.Path, r.Header))
+		w.Write(cacheMiss(r.URL.Path, r.Header, bucketName, key, db))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
 
-		w.Write(val.Value)
+		w.Write(val)
 	}
 
 }
@@ -167,7 +200,7 @@ func main() {
 
 	httpPort = getEnv(httpPortEnv, defaultHTTPPort)
 	httpsPort = getEnv(httpsPortEnv, defaultHTTPSPort)
-	memcacheURL = getEnv(memcacheURLEnv, defaultMemcacheURL)
+	// memcacheURL = getEnv(memcacheURLEnv, defaultMemcacheURL)
 	ttl = getEnv(ttlEnv, defaultTTL)
 	certPath = getEnv(certPathEnv, "")
 	certKeyPath = getEnv(certKeyPathEnv, "")
@@ -183,8 +216,6 @@ func main() {
 		fmt.Printf("Set %s to the path of the SSL .key file\n", certKeyPathEnv)
 		return
 	}
-
-	mc = memcache.New(memcacheURL)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
