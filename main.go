@@ -69,7 +69,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	var val []byte
 	s := strings.Split(r.URL.Path, "/")
 	bucketName := []byte(s[1])
-	key := []byte(s[2])
+	key := []byte(s[2] + "/" + s[3])
 	err = db.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bucketName)
 		if bkt != nil {
@@ -83,14 +83,15 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		w.WriteHeader(http.StatusSeeOther)
+		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte("Status: 303"))
 	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
 		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
-		w.WriteHeader(http.StatusSeeOther)
+		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte("Status: 303"))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
 
 		w.Write(val)
 	}
@@ -115,7 +116,7 @@ func handlePut(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 	s := strings.Split(r.URL.Path, "/")
 	bucketName := []byte(s[1])
-	key := []byte(s[2])
+	key := []byte(s[2] + "/" + s[3])
 	updateKey(bucketName, key, []byte(body), db)
 
 	d, _ := time.ParseDuration(ttl + "s")
