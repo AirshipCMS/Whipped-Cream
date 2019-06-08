@@ -28,9 +28,10 @@ var (
 	httpsPort   string
 	certPath    string
 	certKeyPath string
+	db          *bolt.DB
 )
 
-func updateKey(bucketName []byte, key []byte, value []byte, db *bolt.DB) {
+func updateKey(bucketName []byte, key []byte, value []byte) {
 	err := db.Update(func(tx *bolt.Tx) error {
 		bkt, err := tx.CreateBucketIfNotExists(bucketName)
 		if err != nil {
@@ -51,24 +52,17 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[%s] Incoming GET Request\n", r.URL.Path)
 
-	db, err := bolt.Open("db", 0600, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
 	var val []byte
 	s := strings.Split(r.URL.Path, "/")
 	bucketName := []byte(s[1])
 	key := []byte(s[2] + "/" + s[3])
-	err = db.View(func(tx *bolt.Tx) error {
+	err := db.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bucketName)
 		if bkt != nil {
 			val = bkt.Get(key)
-			return err
 		}
 		return nil
 	})
-	fmt.Println(len(val))
 
 	if err != nil || len(val) == 0 {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
@@ -96,11 +90,6 @@ func handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := bolt.Open("db", 0600, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
 	s := strings.Split(r.URL.Path, "/")
 	bucketName := []byte(s[1])
 	key := []byte(s[2] + "/" + s[3])
@@ -108,9 +97,9 @@ func handlePut(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.URL.Path, "/clear") {
 		clearKey := strings.Split(r.URL.Path, s[1])[1]
 		clearKey = strings.Split(clearKey, "/")[1]
-		clearAllPath(bucketName, []byte(clearKey+"/all"), db)
+		clearAllPath(bucketName, []byte(clearKey+"/all"))
 	}
-	updateKey(bucketName, key, []byte(body), db)
+	updateKey(bucketName, key, []byte(body))
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Status: 200"))
 }
@@ -147,7 +136,7 @@ func handleReq(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[%s] %s Response: %s\n", r.URL.Path, reqMethod, string(body))
 }
 
-func clearAllPath(bucketName []byte, key []byte, db *bolt.DB) {
+func clearAllPath(bucketName []byte, key []byte) {
 	err := db.Update(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bucketName)
 		if bkt != nil {
@@ -184,6 +173,9 @@ func main() {
 		fmt.Printf("Set %s to the path of the SSL .key file\n", certKeyPathEnv)
 		return
 	}
+
+	db, _ = bolt.Open("db", 0600, nil)
+	defer db.Close()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
