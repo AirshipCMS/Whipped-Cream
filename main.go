@@ -13,31 +13,21 @@ import (
 	"github.com/boltdb/bolt"
 )
 
-// TTL info for each request
-type TTL struct {
-	CachedTime time.Time
-	ExpiryTime time.Time
-}
-
 const (
 	defaultHTTPPort  = "8080"
 	httpPortEnv      = "HTTP_PORT"
 	defaultHTTPSPort = "4433"
 	httpsPortEnv     = "HTTPS_PORT"
-	defaultTTL       = "3600" // seconds
-	ttlEnv           = "TTL"
 	certPathEnv      = "CERT_PATH"
 	certKeyPathEnv   = "CERT_KEY_PATH"
 	timeFormat       = "01-02-2006 03:04:05PM"
 )
 
 var (
-	reqMap      = make(map[string]TTL)
 	httpPort    string
 	httpsPort   string
 	certPath    string
 	certKeyPath string
-	ttl         string
 )
 
 func updateKey(bucketName []byte, key []byte, value []byte, db *bolt.DB) {
@@ -78,15 +68,12 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	fmt.Println(len(val))
 
-	if err != nil {
+	if err != nil || len(val) == 0 {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte("Status: 303"))
-	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
-		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
 		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte("Status: 303"))
 	} else {
@@ -117,16 +104,13 @@ func handlePut(w http.ResponseWriter, r *http.Request) {
 	s := strings.Split(r.URL.Path, "/")
 	bucketName := []byte(s[1])
 	key := []byte(s[2] + "/" + s[3])
-	updateKey(bucketName, key, []byte(body), db)
 
-	d, _ := time.ParseDuration(ttl + "s")
-	reqMap[r.URL.Path] = TTL{
-		CachedTime: time.Now().Local(),
-		ExpiryTime: time.Now().Local().Add(time.Duration(d)),
+	if strings.Contains(r.URL.Path, "/clear") {
+		clearKey := strings.Split(r.URL.Path, s[1])[1]
+		clearKey = strings.Split(clearKey, "/")[1]
+		clearAllPath(bucketName, []byte(clearKey+"/all"), db)
 	}
-
-	fmt.Printf("Expiry Time: %s\n", reqMap[r.URL.Path].ExpiryTime.Format(timeFormat))
-
+	updateKey(bucketName, key, []byte(body), db)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Status: 200"))
 }
@@ -163,6 +147,22 @@ func handleReq(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[%s] %s Response: %s\n", r.URL.Path, reqMethod, string(body))
 }
 
+func clearAllPath(bucketName []byte, key []byte, db *bolt.DB) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(bucketName)
+		if bkt != nil {
+			err := bkt.Delete(key)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 func getEnv(key, defVal string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
@@ -174,7 +174,6 @@ func main() {
 
 	httpPort = getEnv(httpPortEnv, defaultHTTPPort)
 	httpsPort = getEnv(httpsPortEnv, defaultHTTPSPort)
-	ttl = getEnv(ttlEnv, defaultTTL)
 	certPath = getEnv(certPathEnv, "")
 	certKeyPath = getEnv(certKeyPathEnv, "")
 	switch {
