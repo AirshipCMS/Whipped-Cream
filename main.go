@@ -4,126 +4,115 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/boltdb/bolt"
 )
 
-// TTL info for each request
-type TTL struct {
-	CachedTime time.Time
-	ExpiryTime time.Time
-}
-
 const (
-	defaultHTTPPort    = "8080"
-	httpPortEnv        = "HTTP_PORT"
-	defaultHTTPSPort   = "4433"
-	httpsPortEnv       = "HTTPS_PORT"
-	targetURLEnv       = "TARGET_URL"
-	defaultMemcacheURL = "127.0.0.1:11211"
-	memcacheURLEnv     = "MEMCACHE_URL"
-	defaultTTL         = "3600" // seconds
-	ttlEnv             = "TTL"
-	certPathEnv        = "CERT_PATH"
-	certKeyPathEnv     = "CERT_KEY_PATH"
-	timeFormat         = "01-02-2006 03:04:05PM"
+	defaultHTTPPort  = "8080"
+	httpPortEnv      = "HTTP_PORT"
+	defaultHTTPSPort = "4433"
+	httpsPortEnv     = "HTTPS_PORT"
+	certPathEnv      = "CERT_PATH"
+	certKeyPathEnv   = "CERT_KEY_PATH"
+	timeFormat       = "01-02-2006 03:04:05PM"
 )
 
 var (
-	mc          *memcache.Client
-	reqMap      = make(map[string]TTL)
 	httpPort    string
 	httpsPort   string
-	targetURL   string
-	memcacheURL string
 	certPath    string
 	certKeyPath string
-	ttl         string
+	db          *bolt.DB
 )
 
-func fetch(path string, headers http.Header) *http.Response {
-
-	netClient := &http.Client{
-		Timeout: time.Second * 10,
-	}
-
-	url := parseTargetURL(path)
-	fmt.Printf("[%s] Fetching\n", url)
-
-	req, reqErr := http.NewRequest("GET", url, nil)
-	if reqErr != nil {
-		fmt.Printf("[%s] Error Fetching: %v", url, reqErr)
-		return &http.Response{
-			Status: "503",
+func updateKey(bucketName []byte, key []byte, value []byte) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		bkt, err := tx.CreateBucketIfNotExists(bucketName)
+		if err != nil {
+			return err
 		}
-	}
-
-	response, resErr := netClient.Do(req)
-	if resErr != nil {
-		fmt.Printf("[%s] Error Fetching: %v", url, reqErr)
-		response = &http.Response{
-			Status: "503",
+		err = bkt.Put(key, value)
+		if err != nil {
+			return err
 		}
-	} else {
-		fmt.Printf("[%s] Cached\n", url)
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	return response
-}
-
-func cacheMiss(urlPath string, headers http.Header) []byte {
-	backendResponse := fetch(urlPath, headers)
-
-	body, _ := ioutil.ReadAll(backendResponse.Body)
-
-	mc.Set(&memcache.Item{Key: urlPath, Value: []byte(body)})
-
-	d, _ := time.ParseDuration(ttl + "s")
-	reqMap[urlPath] = TTL{
-		CachedTime: time.Now().Local(),
-		ExpiryTime: time.Now().Local().Add(time.Duration(d)),
-	}
-
-	fmt.Printf("Expiry Time: %s\n", reqMap[urlPath].ExpiryTime.Format(timeFormat))
-	return body
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[%s] Incoming GET Request\n", r.URL.Path)
 
-	val, err := mc.Get(r.URL.Path)
+	var val []byte
+	s := strings.Split(r.URL.Path, "/")
+	bucketName := []byte(s[1])
+	key := []byte(s[2] + "/" + s[3])
+	err := db.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(bucketName)
+		if bkt != nil {
+			val = bkt.Get(key)
+		}
+		return nil
+	})
 
-	if err != nil {
+	if err != nil || len(val) == 0 {
 		fmt.Printf("[%s] Cache MISS\n", r.URL.Path)
 		fmt.Println(err)
 
-		w.Write(cacheMiss(r.URL.Path, r.Header))
-	} else if time.Now().Local().After(reqMap[r.URL.Path].ExpiryTime) {
-		fmt.Printf("[%s] Cache MISS (Expired)\n", r.URL.Path)
-		w.Write(cacheMiss(r.URL.Path, r.Header))
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte("Status: 303"))
 	} else {
 		fmt.Printf("[%s] Cache HIT\n", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
 
-		w.Write(val.Value)
+		w.Write(val)
 	}
 
 }
 
+func handlePut(w http.ResponseWriter, r *http.Request) {
+
+	fmt.Printf("[%s] Incoming PUT Request\n", r.URL.Path)
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Error reading body: %v", err)
+		http.Error(w, "can't read body", http.StatusBadRequest)
+		return
+	}
+
+	s := strings.Split(r.URL.Path, "/")
+	bucketName := []byte(s[1])
+	key := []byte(s[2] + "/" + s[3])
+
+	if strings.Contains(r.URL.Path, "/clear") {
+		clearKey := strings.Split(r.URL.Path, s[1])[1]
+		clearKey = strings.Split(clearKey, "/")[1]
+		clearAllPath(bucketName, []byte(clearKey+"/all"))
+	}
+	updateKey(bucketName, key, []byte(body))
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Status: 200"))
+}
+
 func handleReq(w http.ResponseWriter, r *http.Request) {
 	reqMethod := strings.ToUpper(r.Method)
-	reqURL := parseTargetURL(r.URL.Path)
-	fmt.Printf("[%s] Incoming %s Request\n", reqURL, reqMethod)
+	fmt.Printf("[%s] Incoming %s Request\n", r.URL.Path, reqMethod)
 
 	client := &http.Client{
 		Timeout: time.Second * 10,
 	}
 
-	req, reqErr := http.NewRequest(reqMethod, reqURL, r.Body)
+	req, reqErr := http.NewRequest(reqMethod, r.URL.Path, r.Body)
 	if reqErr != nil {
 		fmt.Printf("reqErr: %v\n", reqErr)
 		w.Write([]byte("Status: 503"))
@@ -144,16 +133,23 @@ func handleReq(w http.ResponseWriter, r *http.Request) {
 
 	body, _ := ioutil.ReadAll(resp.Body)
 	w.Write(body)
-	fmt.Printf("[%s] %s Response: %s\n", reqURL, reqMethod, string(body))
+	fmt.Printf("[%s] %s Response: %s\n", r.URL.Path, reqMethod, string(body))
 }
 
-func parseTargetURL(path string) string {
-	reqURL := targetURL
-	if reqURL[len(reqURL)-1:] == "/" {
-		reqURL = reqURL[:len(reqURL)-1]
+func clearAllPath(bucketName []byte, key []byte) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(bucketName)
+		if bkt != nil {
+			err := bkt.Delete(key)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	return reqURL + path
 }
 
 func getEnv(key, defVal string) string {
@@ -167,15 +163,9 @@ func main() {
 
 	httpPort = getEnv(httpPortEnv, defaultHTTPPort)
 	httpsPort = getEnv(httpsPortEnv, defaultHTTPSPort)
-	memcacheURL = getEnv(memcacheURLEnv, defaultMemcacheURL)
-	ttl = getEnv(ttlEnv, defaultTTL)
 	certPath = getEnv(certPathEnv, "")
 	certKeyPath = getEnv(certKeyPathEnv, "")
-	targetURL = os.Getenv(targetURLEnv)
 	switch {
-	case targetURL == "":
-		fmt.Printf("Set %s to the domain that will be cached\n", targetURLEnv)
-		return
 	case certPath == "":
 		fmt.Printf("Set %s to the path of the SSL .crt file\n", certPathEnv)
 		return
@@ -184,11 +174,14 @@ func main() {
 		return
 	}
 
-	mc = memcache.New(memcacheURL)
+	db, _ = bolt.Open("data/db", 0600, nil)
+	defer db.Close()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			handleGet(w, r)
+		} else if r.Method == http.MethodPut {
+			handlePut(w, r)
 		} else {
 			handleReq(w, r)
 		}

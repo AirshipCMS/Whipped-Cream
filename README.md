@@ -1,29 +1,19 @@
 # Whipped Cream
 
-forward proxy cache with memcached
+## Usage
 
-## Build
-```
-CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo .
-```
+see [GomaGames/stem.airshipcms.io #281](https://github.com/GomaGames/stem.airshipcms.io/issues/281)
 
-## Memcache
+## Docker
 
-run locally for dev
+### Build
 
 ```sh
-run --name memcache -d -p 11211:11211 memcached:alpine
+docker build -t quay.io/airshipcms/whipped-cream:latest .
 ```
 
-## Proof so far
+### Run
 
 ```sh
-TARGET_URL=https://swapi.co ./Whipped-Cream
-```
-
-```sh
-curl -v localhost:8080/api/starships/9
-# should be cache miss
-curl -v localhost:8080/api/starships/9
-# should be cache hit, and fast
+docker run --rm -t -v $(pwd)/data:/data quay.io/airshipcms/whipped-cream:latest
 ```
