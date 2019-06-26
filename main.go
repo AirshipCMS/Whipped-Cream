@@ -115,7 +115,7 @@ func handleReq(w http.ResponseWriter, r *http.Request) {
 	req, reqErr := http.NewRequest(reqMethod, r.URL.Path, r.Body)
 	if reqErr != nil {
 		fmt.Printf("reqErr: %v\n", reqErr)
-		w.Write([]byte("Status: 503"))
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
@@ -126,7 +126,7 @@ func handleReq(w http.ResponseWriter, r *http.Request) {
 	resp, resErr := client.Do(req)
 	if resErr != nil {
 		fmt.Printf("resErr: %v\n", resErr)
-		w.Write([]byte("Status: 503"))
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 	defer resp.Body.Close()
