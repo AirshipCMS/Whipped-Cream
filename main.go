@@ -174,7 +174,7 @@ func main() {
 		return
 	}
 
-	db, _ = bolt.Open("db", 0600, nil)
+	db, _ = bolt.Open("data/db", 0600, nil)
 	defer db.Close()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
